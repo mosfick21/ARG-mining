@@ -11,6 +11,7 @@ argon-miner: one-command launcher for the official Argonmine (ARG) node miner.
 Only the payout ADDRESS is used. Your 24 words never touch this machine.
 """
 import argparse, hashlib, json, os, platform, re, secrets, shutil, signal, subprocess, sys, time, urllib.request, zipfile
+from collections import deque
 
 VERSION = "1.1.0"
 BASE = "https://docs.argonmine.com/downloads"
@@ -147,6 +148,7 @@ class Node:
         if tag:
             cmd += ["-tag", tag]
         self.quiet = quiet
+        self.tail = deque(maxlen=8)
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         os.set_blocking(self.p.stdout.fileno(), False)
 
@@ -165,7 +167,10 @@ class Node:
             if not line:
                 time.sleep(0.2)
                 continue
+            self.tail.append(line.rstrip())
             low = line.lower()
+            if "status:" in low:
+                continue  # the launcher prints its own status line
             if not self.quiet and any(k in low for k in ("error", "found", "mined", "warn")):
                 print(line.rstrip(), flush=True)
 
@@ -210,7 +215,7 @@ def candidates(cpus, phys, mem_cap):
 
 def sync(binp, datadir, addr):
     say("Syncing the chain (first start takes a few minutes)")
-    n = Node(binp, datadir, addr, 0, "", quiet=True, mine=False)
+    n = start_node(binp, datadir, addr, 0, "", quiet=True, mine=False)
     try:
         t0, last = time.time(), 0
         while time.time() - t0 < 900 and n.p.poll() is None:
@@ -225,10 +230,25 @@ def sync(binp, datadir, addr):
         say("Sync still running, continuing anyway")
     finally:
         n.stop()
+        time.sleep(2)
+
+
+def start_node(binp, datadir, addr, threads, tag, quiet, mine=True, attempts=4):
+    """Start the node; if it dies right away (previous instance still releasing
+    the database or RPC port), wait and retry instead of reporting 0 H/s."""
+    for i in range(attempts):
+        n = Node(binp, datadir, addr, threads, tag, quiet, mine)
+        n.pump(3)
+        if n.p.poll() is None:
+            return n
+        reason = next((l for l in reversed(n.tail) if l), "no output")
+        say(f"Node exited at start (code {n.p.returncode}): {reason[-160:]}")
+        time.sleep(3 * (i + 1))
+    sys.exit("The node keeps exiting at start. Check the message above.")
 
 
 def measure(binp, datadir, addr, threads):
-    n = Node(binp, datadir, addr, threads, "", quiet=True)
+    n = start_node(binp, datadir, addr, threads, "", quiet=True)
     try:
         n.pump(TUNE_WARMUP_S)
         samples, end = [], time.time() + TUNE_MEASURE_S
@@ -240,6 +260,7 @@ def measure(binp, datadir, addr, threads):
         return sum(samples) / len(samples) if samples else 0.0
     finally:
         n.stop()
+        time.sleep(2)
 
 
 def tune(binp, datadir, addr, cpus, phys, mem_cap, cache):
@@ -320,7 +341,7 @@ def main():
     say(f"Mining with {threads} threads. Report every 60s. Stop with Ctrl+C.")
     restarts = 0
     while not stop["v"]:
-        n = Node(binp, datadir, addr, threads, a.tag, quiet=False)
+        n = start_node(binp, datadir, addr, threads, a.tag, quiet=False)
         try:
             while n.p.poll() is None and not stop["v"]:
                 n.pump(60)
