@@ -317,7 +317,7 @@ def main():
             sync(binp, datadir, addr)
             threads = tune(binp, datadir, addr, cpus, phys, mem_cap, cache)
 
-    say(f"Mining with {threads} threads. Report every 60s. Stop: Ctrl+C or interrupt the cell.")
+    say(f"Mining with {threads} threads. Report every 60s. Stop with Ctrl+C.")
     restarts = 0
     while not stop["v"]:
         n = Node(binp, datadir, addr, threads, a.tag, quiet=False)
